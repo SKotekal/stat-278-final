@@ -1,0 +1,147 @@
+---
+title: "Lasso Feature Selection"
+output: html_notebook
+---
+
+```{r}
+## Read Data from csv files
+
+labels = read.csv('TCGA-PANCAN-HiSeq-801x20531/labels.csv')[,-1] # labels[i] = tumor type for patient #i (5 types: BRCA, COAD, KIRC, LUAD, PRAD)
+data = read.csv('TCGA-PANCAN-HiSeq-801x20531/data.csv')[,-1]
+data = data[,which(colSums(data!=0)>0)] # removing genes with zero expression level across all patients
+colnames(data) = NULL
+# 801 patients, 20264 genes
+```
+
+```{r}
+# Set up data
+set.seed(278)
+X = as.matrix(data) 
+Y = labels
+n = length(Y)
+tumors <- c("BRCA", "COAD", "KIRC", "LUAD", "PRAD")
+
+num_train = 300
+num_test = n-num_train
+
+train <- sample(1:n, num_train)
+test <- setdiff(1:n, train)
+
+Xtest = X[test,]
+Ytest = Y[test]
+Xtrain = X[train,]
+Ytrain = Y[train]
+
+num_neighbors = 10
+alpha = 0.1
+```
+
+
+```{r}
+# Select features via Logistic LASSO
+library(glmnet)
+#fit = glmnet(Xtrain, Ytrain, family="multinomial", type.multinomial="grouped")
+cvfit = cv.glmnet(Xtrain, Ytrain, family="multinomial", type.multinomial="grouped")
+```
+
+```{r}
+# Grab lambda values and associated selected variables
+lambda_vals <- cvfit$lambda
+selected_var <- predict(fit,type="nonzero")
+lamb_index = cvfit$lambda.1se
+
+Xtrain = X[train,unlist(selected_var[lamb_index])]
+
+```
+
+```{r}
+# We now fit p(Y|X). We will use kNN
+library(FNN)
+
+kNN_condl_prob <- function(y, x, num_neighbors, xTrain, yTrain){
+  nbhrs = get.knnx(xTrain, x, k=num_neighbors) 
+  return(length(which(yTrain[nbhrs$nn.index] == y))/num_neighbors)
+}
+```
+
+```{r}
+
+ntrain = length(train)
+I1_ind = sample(1:ntrain, floor(ntrain/2))
+I2_ind= setdiff(1:ntrain, I1_ind)
+I1 = Xtrain[I1_ind,]
+I1y = Ytrain[I1_ind]
+I2 = Xtrain[I2_ind,]
+I2y = Ytrain[I2_ind]
+
+phat_I2 <- c()
+for (i in 1:length(I2_ind)) {
+  phat_I2 <- c(phat_I2, kNN_condl_prob(I2y[i], t(I2[i,]), num_neighbors, I1, I1y))
+}
+```
+
+```{r}
+# Get thresholds for total coverage
+thlds <- function(phat, alpha) {
+  S = sort(phat, decreasing=FALSE)
+  return(S[ceiling((length(phat)+1)*alpha-1)])
+  
+}
+
+t = thlds(phat_I2, alpha)
+```
+
+```{r}
+# Classify test data 
+results = matrix(0L, ncol = 5, nrow=length(test))
+pvals = c()
+for(i in 1:length(test)) {
+  x = Xtest[i, unlist(selected_var[lamb_index])]
+  
+  index = 1
+  for(tum in tumors){
+    p <- kNN_condl_prob(tum, t(x), num_neighbors, I1, I1y)
+    pvals <- c(pvals, p)
+    if(p >= t){
+      results[i, index] = 1
+    }
+    index = index + 1
+  }
+}
+```
+
+```{r}
+# Count number of points with null classification
+num_null <- length(which(rowSums(results) == 0))
+num_null
+```
+
+```{r}
+# Count number of points with more than 1 classification
+num_ambig <- length(which(rowSums(results) > 1))
+num_ambig
+```
+
+```{r}
+# Compute coverage rate
+coverage_rate <- 0
+for(i in 1:length(test)) {
+  if(results[i, Ytest[i]] == 1) {
+    coverage_rate <- coverage_rate + 1
+  }
+}
+coverage_rate <- coverage_rate/length(test)
+coverage_rate
+```
+
+```{r}
+
+## Perform PCA on X data that contains only features selected by LASSO
+X.pca <- princomp(X[,unlist(selected_var[lamb_index])])
+Y.color <- rep('red', n)
+Y.color[which(as.double(Y)==2)] <- 'gold'
+Y.color[which(as.double(Y)==3)] <- 'blue'
+Y.color[which(as.double(Y)==4)] <- 'pink'
+Y.color[which(as.double(Y)==5)] <- 'green'
+plot(X.pca$score[,1], X.pca$score[,2], col=Y.color, pch=as.character(Y))
+```
