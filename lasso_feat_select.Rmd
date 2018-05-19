@@ -47,7 +47,7 @@ cvfit = cv.glmnet(Xtrain, Ytrain, family="multinomial", type.multinomial="groupe
 ```{r}
 # Grab lambda values and associated selected variables
 lambda_vals <- cvfit$lambda
-selected_var <- predict(fit,type="nonzero")
+selected_var <- predict(cvfit,type="nonzero")
 lamb_index = cvfit$lambda.1se
 
 Xtrain = X[train,unlist(selected_var[lamb_index])]
