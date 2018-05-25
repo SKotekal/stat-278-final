@@ -7,6 +7,17 @@ This project is prediction of tumor types from gene expression levels with bound
 
 ## Project Outline
 
+### Objectives/Questions we asked
+* How do different feature selection methods affect the results of the classifier?
+    * Feature selection can be approached from a different perspectives. In particular, we will be analyzing using LASSO, Fisher Score, and PCA to select features. 
+* How does varying &alpha; (the misclassification error bound) affect the ambiguity of the classifier when different methods for feature selection are used?
+* The classifier utilizes a split-conformal inference step in which the data must be split for estimating a conditional probability distribution and learning a decision rule. How does the proportion of the split affect the number of ambiguious classifications?
+* For a desired ambiguity level, what proportion does our data split have to be? How does this depend on our feature selection method?
+* The classifier can be modified to bound the error of misclassification conditional on tumor type. As such, the classifier must be more conservative with its predictions. How conservative does it become with various alpha and data splitting choices?
+* How does this method compare with other standard classification algorithms? In particular, how does this compare with LASSO? Is LASSO prone to overfitting? The classifer discussed in the above paper guarantees an error bound, but has a tradeoff with ambiguity. 
+* Which genes decrease the ambiguity the most? In particular, we will run OMP with the residual being the number of ambiguious classifications. 
+
+
 ### Partitioning Data
 The data will need to be partitioned into a training and test set. Further, the training set will hvae to be further partitioned as part of the classifier procedure, but this will be discussed later. The breakdown of the data into a training and test set will require some thought. In particular, we must consider
 
@@ -16,25 +27,22 @@ The data will need to be partitioned into a training and test set. Further, the 
 * Same number of all tumor types in training set?
 
 ### Feature Selection 
-The gene dataset is very high-dimensional (801 patients, 20264 genes) and it is computationally intractable to construct "least ambiguous with bounded error level" (LABEL) classifiers directly from all of the data. As such, a feature selection step is necessary. Clearly any choice here will affect the final results (such as the size of ambiguous and null regions), and so we will investigate several feature selection methods. In particular, we may investigate 
+The gene dataset is very high-dimensional (801 patients, 20264 genes) and it is computationally intractable to construct "least ambiguous with bounded error level" (LABEL) classifiers directly from all of the data. As such, a feature selection step is necessary. Clearly any choice here will affect the final results (such as the size of ambiguous and null regions), and so we will investigate several feature selection methods. In particular, 
 
-* LASSO (this will require a choice of &lambda; - perhaps chosen via cross-validation?)
-* Orthogonal Matching Pursuit (greedy method - iteratively add features until good fit)
-* Correlate genes to tumor type and pick K most higly correlated (choose genes also uncorrelated with other genes?)
-* Cluster based on correlation and pick representative from each cluster
-* Principal Components Analysis and use first K components as features (Other dim reduct. methods?)
+* LASSO (&lambda; will be chosen via cross validation) - this is a standard method for feature selection
+* Fisher Score - common filter method for feature selection
 * Variance Threshold - exclude genes that have low variance across all patients (threshold is user-defined parameter)
+* Principal Components Analysis and use first K components as features - common dimensionality reduction method
+
+These methods are chosen to reflect a few approaches to feature selection, and we are interested in how these approaches will differ in their results.
 
 ### Estimating Conditional Probability Distribution 
-The procedure laid out in the paper requires estimating the conditional probability distribution ```p(Y|X)``` where ```Y``` is the tumor type and ```X``` is the vector of features. The estimation methods that could be used include
+The procedure laid out in the paper requires estimating the conditional probability distribution ```p(Y|X)``` where ```Y``` is the tumor type and ```X``` is the vector of features. The estimation methods that will be considered
 
 * kNN (Nearest Neighbors - choice of k required)
-* Local Polynomial Estimator
 * Regularized Logistic Regression
-* Kernel Regression (other SVM methods for regression?)
-* Naive Bayes
 
-I dont think there should be much of a difference in choosing different methods at this stage since there is a ***conformal inference*** step that guarantees distribution free, finite sample validity. I think the estimation procedure just needs to satisfy some technical requirements given in the paper. However, my understanding may be mistaken here, so we should investigate this point as well. 
+This step is not entirely critical since there is a ***conformal inference*** step that guarantees distribution free, finite sample validity. The estimation procedure just needs to satisfy some technical requirements given in the paper.
 
 ### Split-Conformal Inference 
 This split-conformal inference method first splits the data into two parts, ```I_1``` and ```I_2```. In this step of the procedure, ```I_1``` is used to estimate the conditonal probability distribution, and ```I_2``` is used to compute the classification region (which is specified by the level sets of the conditional probability distribution). 
@@ -56,7 +64,9 @@ The different choices we make must be assessed in order to find an "optimal" cla
 * Size of null region (number of points with null set prediction)
 * Size of ambiguity (number of points with 2 or more class prediction)
 * Relationship of above metrics to complexity of model (number of features, etc)
-* Relationship of above metrics as &alpha; changes (phase diagram?)
+* Relationship of above metrics as &alpha; changes (phase diagram)
+
+A short remark regarding the null region. The null region is the region of space in which there is no classification. Conceptually, this is no different than a fully ambiguous classification, in which the classifier gives all 5 tumor types to a point in the null region. These null regions arise due to a technical constraint in the paper. The authors address this null region via methods to extend the classifier, so it is our opinion that is intellectually dishonest to call points that initially have no classification as ambiguous. Yet we still believe it is an interesting question to ask about how these null regions change with different parameters before handling the regions with methods described in the paper. 
 
 ## Further Extensions
 ### Total Coverage vs Class Specific Coverage
@@ -74,11 +84,4 @@ and it decreases as the probability of the largest class increases.
 
 
 ### Dealing with Null Regions 
-The authors of the paper give methods to deal with null regions, namely by filling with a baseline classifier and a procedure termed Accretive Completion. What interesting questions are there regarding this?
-
-### Inference
-We may also wish to do some inference at the end of the classification step. Specifically, once we have identified a classifier with bounded &alpha; error that best minimizes ambiguity and the null region, we have a good model for which genes are most predictive of tumor type. With these genes, we may be able to do inference and determine which genes are expressed higher/lower given a tumor type. This means that we have turned the classification procedure into a very extensive feature selection procedure, but this may give some guarantees regarding the inference. This is seemingly (I'm probably mistaken) equivalent to "regressing out" effects of other genes to study the relationships between selected genes and tumor type. This is really an extension of the project if needed.  
-
-This will require that we partition the data further into a training set, test set, and inference set, where we use the inference set to actually test our hypothesis. In this paradigm, we can use classical hypothesis testing.
-
-However, if we decide to make it more complicated, we can get rid of an inference set and do inference via selective inference methods. This seems much more complicated as the selection procedure for the genes we do select is very extensive. This approach is probably intractable.
+The authors of the paper give methods to deal with null regions, namely by filling with a baseline classifier and a procedure termed Accretive Completion.
