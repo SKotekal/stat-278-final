@@ -1,0 +1,269 @@
+---
+title: "OMP on Variance Thresholds - Hypothesis Testing : 'How do few genes give us good prediction?'"
+output: html_notebook
+---
+
+```{r}
+## Read Data from csv files
+
+labels = read.csv('TCGA-PANCAN-HiSeq-801x20531/labels.csv')[,-1] # labels[i] = tumor type for patient #i (5 types: BRCA, COAD, KIRC, LUAD, PRAD)
+data = read.csv('TCGA-PANCAN-HiSeq-801x20531/data.csv')[,-1]
+data = data[,which(colSums(data!=0)>0)] # removing genes with zero expression level across all patients
+colnames(data) = NULL
+# 801 patients, 20264 genes
+```
+
+```{r}
+# Set up data
+set.seed(278)
+X = as.matrix(data) 
+Y = labels
+n = length(Y)
+tumors <- c("BRCA", "COAD", "KIRC", "LUAD", "PRAD")
+NUM_GENES <- dim(X)[2]
+
+num_train <- 640
+num_test <- n-num_train
+
+train <- sample(1:n, num_train)
+test <- setdiff(1:n, train)
+
+Xtest = X[test,]
+Ytest = Y[test]
+Xtrain = X[train,]
+Ytrain = Y[train]
+
+# Split data for split-conformal inference step
+ntrain <- length(train)
+I1_ind <- sample(1:ntrain, floor(ntrain/2))
+I2_ind <- setdiff(1:ntrain, I1_ind)
+I1 <- Xtrain[I1_ind,]
+I1y <-  Ytrain[I1_ind]
+I2 <- Xtrain[I2_ind,]
+I2y <- Ytrain[I2_ind]
+
+
+num_neighbors <- 10
+alpha <- 0.1
+```
+
+```{r}
+# We will use kNN to fit p(y|x)
+library(FNN)
+
+kNN_condl_prob <- function(y, x, num_neighbors, xTrain, yTrain){
+  nbhrs = get.knnx(xTrain, x, k=num_neighbors) 
+  return(length(which(yTrain[nbhrs$nn.index] == y))/num_neighbors)
+}
+
+ # Compute thresholds for total coverage
+thlds <- function(phat, alpha) {
+  S = sort(phat, decreasing=FALSE)
+  return(S[ceiling((length(phat)+1)*alpha-1)])
+}
+```
+
+```{r}
+# First, we drop genes that have low variance in order to reduce the 
+# the total search space
+feat_vars <- apply(scale(I1, center=FALSE, scale=colSums(I1)), 2, var)
+qtiles = seq(0.75, 1.0, by=0.0125)
+train_ambigs = rep(0, length(qtiles))
+train_nulls = rep(0, length(qtiles))
+
+counter = 1
+
+for(q in qtiles) {
+  high_var_ind <- which(feat_vars >= quantile(feat_vars, q, na.rm=TRUE))
+  print(length(high_var_ind))
+  
+  # Estimate the distribution of p(y|x) - only I1 is allowed for fitting p(y|x)
+  phat_I2 <- rep(0, length(I2_ind))
+  for(i in 1:length(I2_ind)) {
+    phat_I2[i] <- kNN_condl_prob(I2y[i], t(I2[i, high_var_ind]), num_neighbors, I1[,high_var_ind], I1y)
+  }
+  
+  # Get thresholds
+  t = thlds(phat_I2, alpha)
+  
+  # Classify train data
+  results = matrix(0L, ncol=5, nrow=length(train))
+  for(i in 1:length(train)) {
+    x = Xtrain[i, high_var_ind]
+    
+    index = 1
+    for(tum in tumors){
+      p <- kNN_condl_prob(tum, t(x), num_neighbors, I1[,high_var_ind], I1y)
+      if(p >= t){
+        results[i, index] = 1
+      }
+      index <- index+1
+    }
+  }
+  # Count number of points with null classification
+  num_null <- length(which(rowSums(results) == 0))
+  print(num_null)
+  
+  # Count number of points with more than 1 classification
+  num_ambig <- length(which(rowSums(results) > 1))
+  print(num_ambig)
+  
+  train_nulls[counter] = num_null
+  train_ambigs[counter] = num_ambig
+  
+  counter = counter+1
+}
+```
+
+Looking at the plots, we see that the number of ambiguous and null classifications grows as the quantile increases. This matches intuition, since increasing the quantile implies that fewer genes are included in the subset of features. Recall that the quantile refers to the quantile of variance (after scaling) of the gene expression levels. Intuitively, we do not expect to be able to predict tumor type unambiguously with only a small subset of genes. Interestingly, we can predict genes with low ambiguity by filtering only based on a variance threshold. This suggests to us that picking genes based on variance is sufficient only when the threshold is not completely restrictive. In other words, we cannot solely predict with small ambiguity using only the genes that are in the top 0.01 quantile of variance. So, prediction is not driven completely by picking super high variance genes.
+
+Looking at the plot, we see that at roughly the 91.25 quantile, we begin to see the tradeoff between number of genes in our model and the number of null/ambiguous classifications. Increasing the quantile dramatically increases the number of ambiguous/null classifications, which is undesireable. As such, the subset of genes found in the 91.25 quantile threshold seems to be optimal in terms of reducing the number of genes. Adding more genes doesn't improve performance. We now ask, why are these genes important to the classifier's performance?
+In particular, we ask the following questions of these genes:
+  * Are these genes significantly associated with tumor type? In particular, is the mean expression level significantly different between tumor types?
+  * Are these genes significantly uncorrelated amongst themselves? (i.e. there is no redundant information?)
+  * Does this selection of genes actually give us comparable performance on the test data?
+
+One may ask whether these are the right questions to consider. Consider that the classifier classifies based on its estimation of the $t$ threshold (which is estimated using $I_2$ data). Recall that $t$ is picked from the quantile of the distribution of $p(Y|X)$. As such, if a classifier gives unambiguous predictions, then it must follow that $t$ is fairly high (i.e. the criterion to be classified in a certain class is difficult to satisfy). But observe that the distribution of $p(Y|X)$ comes from estimating the probability distribution. If we are using a subset of the genes to do this estimation, then clearly it must be the case that the genes are strongly associated to the tumor types in order to give us a high $t$ value. So we must ask about the association between the tumor types and the genes, and how the mean expression level varies across tumor type is a very natural notion of association to consider. As such, we ask about this association between the genes and tumor types. 
+  Further, consider that we have selected a minimal subset of genes while minimizing the ambiguity. We have removed the redudnancy of the other genes. In what ways does this redudnancy manifest? Is it that these genes are uncorrelated amongst themselves and so are able to add significant information (in the notions of Information Theory)? As such, we ask about the correlation structure between the genes. 
+
+```{r}
+qtile = 0.9125
+high_var_ind <- which(feat_vars >= quantile(feat_vars, qtile, na.rm=TRUE))
+
+# Classify test data 
+results = matrix(0L, ncol = 5, nrow=length(test))
+for(i in 1:length(test)) {
+  x = Xtest[i, high_var_ind]
+  index = 1
+  for(tum in tumors){
+    p <- kNN_condl_prob(tum, t(x), num_neighbors, I1[,high_var_ind], I1y)
+    if(p >= t){
+      results[i, index] = 1
+    }
+    index = index + 1
+  }
+}
+
+# Count number of points with null classification
+test_null <- length(which(rowSums(results) == 0))
+
+# Count number of points with more than 1 classification
+test_ambig <- length(which(rowSums(results) > 1))
+
+```
+
+```{r}
+# Compute coverage rate
+coverage_rate <- 0
+for(i in 1:length(test)) {
+  if(results[i, Ytest[i]] == 1) {
+    coverage_rate <- coverage_rate + 1
+  }
+}
+coverage_rate <- coverage_rate/length(test)
+coverage_rate
+```
+We see from the results above that we have ```test_null``` $ = 0$ and ```test_ambig``` $=26$. Comparing this with the results of the training set, we see that ```train_null```$=41$ and ```train_ambig``` $=0$. The classifier makes more ambiguous classifications in the test set than the training set, which is expected as we chose the quantile $0.9125$ to minimize the number of ambiguous classifications. It is important to recall that the classifier is build to minimize ambiguity while guaranteeing a misclassification error bound. As such, it makes sense to compare ambiguous classifications as ambiguity is the metric which is being optimized. Therefore, the intuitive differences between a test and training set in classical model fitting apply to this setting as well.
+  (So here I don't think we can actually compare the test null to the train null since the null region is not actually being minimized. We would have to add accretive completion in order to really compare how the null points change with respect to training and test data. Maybe this is something we should do.)
+  Further, observe the difference between ```test_ambig``` and ```train_ambig```. In a total test set of $161$ individuals, $26$ ambiguous classifications amounts to a $\sim 16.15\%$ ambiguous classification rate. This suggests potential overfitting, and perhaps we must increase the quantile of genes considered. However, once seeing the results of the test data, we are committed to investigating our selected subset of genes. In addition, classifying $\sim 83.85\%$ of individuals correctly while only using genes with variance about the $91.25\%$ threshold is an interesting result, and our original question still has merit.
+
+So, we continue with our investigation. Our first question is: are these genes significantly correlated with tumor type? We have the following hypothesis testing paradigm:
+$$
+  H_{0,i,j} : \text{Gene } j \text{ does not have significantly different mean expression level in tumor type } i. \\
+  H_{1, i,j} : \text{Gene } j \text{ does have a significantly different mean expression level in tumor type } i
+$$
+Here, we take $j$ to be the index of genes above the $91.25\%$ quantile in variance. Further, we take $i \in \{1, 2, 3, 4, 5\}$, where the ordered set of tumor types are {"BRCA", "COAD", "KIRC", "LUAD", "PRAD"}. To compute p-values, we will perform permutation tests. 
+  Observe that we are in a multiple testing setting since we have a hypothesis test for each gene and tumor type. Thus, we will run the Benjamini-Hochberg procedure in order to correctly reject/fail to reject our numerous null hypotheses. Further, it is clear that these p-values will most likely not be independent, so we will be using the BH Theory for arbitrary dependence to set our significance level. 
+  In addition, consider that we are running these significance tests on the test data, which we did not use to select the genes above the $91.25\%$ quantile of variance. As such, no additional correction is needed. 
+
+```{r}
+nperm = 1000
+pvals_perm = c()
+pval_tumor_ind = c()
+pval_gene_ind = c()
+for(tum in tumors) {
+  pval_tumor_ind = c(pval_tumor_ind, rep(tum, length(high_var_ind)))
+  pval_gene_ind = c(pval_gene_ind, high_var_ind)
+  tumor_ind <- which(Ytest == tum)
+  non_tumor_ind <- which(Ytest != tum)
+  meandiffs <- colMeans(Xtest[tumor_ind, high_var_ind]) - colMeans(Xtest[non_tumor_ind, high_var_ind]) 
+  perms <- apply(matrix(rnorm(nperm*(length(test))), nperm, length(test)), 1, order) # each column is one permutation
+  perms_get_meandiff <- (perms <= length(tumor_ind))/length(tumor_ind) - (perms > length(tumor_ind))/(length(test)-length(tumor_ind))
+  meandiffs_perm <- t(Xtest[,high_var_ind])%*%perms_get_meandiff
+  pvals_perm = c(pvals_perm, (1 + rowSums(abs(meandiffs_perm) >= abs(meandiffs)%*%t(rep(1, nperm))))/(1+nperm))
+}
+adjusted_pvals = p.adjust(pvals_perm, method=c("BH"))
+length(which(adjusted_pvals <= 0.05))
+```
+
+After the BH correction, we rejected 652 of our null hypotheses. This implies that there exist $652$ combinations of ordered pairs of gene and tumor type i.e $(\text{gene}~a, \text{tumor type}~j)$ which exhibited different mean expression levels than other combinations $(\text{gene}~b, \text{tumor type}~k)$. Noticeably, this is much fewer than the total number of combinations $8845$. More interestingly, the number of rejections is fewer than the number of selected genes $1769$. This suggests that many of our genes do **not** express differently on average for different tumor types. Yet they were included in the $91.25\%$ variance quantile and were deemed important to the performance of the classifier! This begs the question for why these genes are included. We now tease apart which hypotheses were rejected to understand the relationships. 
+
+First, we looked at which tumor types exhibited different mean expression levels (i.e. which tumor types had null hypotheses which were rejected).
+
+```{r}
+barplot(table(pval_tumor_ind[which(adjusted_pvals <= 0.05)]))
+```
+As expected, we see that all tumor types are represented, i.e. there are genes which express significantly differently for each tumor type than all of the other tumor types. We expect this result since we picked high variance genes, and it is not unrealistic that tumor types have associated high expression genes. 
+
+We then looked at which genes were part of hypotheses that were rejected. 
+```{r}
+barplot(table(pval_gene_ind[which(adjusted_pvals <= 0.05)]))
+```
+
+
+Tie this back to the algorithm. Why are we looking at this again? Because we are interested in association between gene and tumor type, as it is from this that the estimation of $p(Y|X)$ is good. In particular, we estimated the conditional probability distribution using kNN. So we see here that there are many genes that express significantly different in various tumors. This implies that in high-dimensional space, the feature vectors corresponding to different tumor types will be significantly far (in the projection onto the gene of interest), and so kNN is able to exploit this to give informative $p(Y|X)$ values. As such, $t$ is computed to be large, and so we minimize ambiguity. However, this does not entirely explain the behavior of the classifier's performance with the $91.25\%$ quantile. In particular, observe that 
+
+```{r}
+print(length(high_var_ind))
+print(length(table(pval_gene_ind[which(adjusted_pvals <= 0.05)])))
+print(length(high_var_ind) - length(table(pval_gene_ind[which(adjusted_pvals <= 0.05)])))
+```
+
+There are a total of $1769$ genes in our selected subset and only $551$ of these genes were part of a rejected null hypothesis. This leaves $1218$ genes which did not express significantly differently to any tumor type. Why are these genes important to our classifier? Recall in our training set that increasing the quantile considered dramatically increased the ambiguity. So it seems that these extra genes are not redundant, yet we cannot explain their presence by the mean expression level alone. 
+
+Just as an interesting check, I removed the genes that expressed significantly different from our list of genes and re-ran the classifier on the test data. 
+```{r}
+no_sig_ind = setdiff(high_var_ind, pval_gene_ind[which(adjusted_pvals <= 0.05)])
+
+# Classify test data 
+results = matrix(0L, ncol = 5, nrow=length(test))
+for(i in 1:length(test)) {
+  x = Xtest[i, no_sig_ind]
+  index = 1
+  for(tum in tumors){
+    p <- kNN_condl_prob(tum, t(x), num_neighbors, I1[,no_sig_ind], I1y)
+    if(p >= t){
+      results[i, index] = 1
+    }
+    index = index + 1
+  }
+}
+
+# Count number of points with null classification
+test_null <- length(which(rowSums(results) == 0))
+
+# Count number of points with more than 1 classification
+test_ambig <- length(which(rowSums(results) > 1))
+print(test_null)
+print(test_ambig)
+```
+and we see that the number of ambiguous classifications rises dramatically. (This is not a rigorous comparison since we used the test data to find the genes that expressed significantly differently. This is just kind of for intuition. Also, don't know if this result is due to no significant gene expression difference or because few genes remaining in feature list). 
+
+So why do we need these extra genes? What purpose do they serve? 
+
+As such, we asked about the correlation structure between the genes. We use the Spearman $\rho$ coefficient to avoid linear assumptions.
+
+```{r}
+gene_corr = cor(Xtest[,high_var_ind], method=c('spearman'))
+```
+
+```{r}
+mean(feat_vars[no_sig_ind])
+mean(feat_vars[setdiff(high_var_ind, no_sig_ind)])
+```
+
+
+
+
+
+
