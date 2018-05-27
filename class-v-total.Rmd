@@ -1,0 +1,359 @@
+---
+title: "Class vs Total Coverage"
+output: html_notebook
+---
+```{r}
+## Read Data from csv files
+
+labels = read.csv('TCGA-PANCAN-HiSeq-801x20531/labels.csv')[,-1] # labels[i] = tumor type for patient #i (5 types: BRCA, COAD, KIRC, LUAD, PRAD)
+data = read.csv('TCGA-PANCAN-HiSeq-801x20531/data.csv')[,-1]
+data = data[,which(colSums(data!=0)>0)] # removing genes with zero expression level across all patients
+colnames(data) = NULL
+# 801 patients, 20264 genes
+```
+
+```{r}
+# Set up data
+set.seed(278)
+X = as.matrix(data) 
+Y = labels
+n = length(Y)
+tumors <- c("BRCA", "COAD", "KIRC", "LUAD", "PRAD")
+NUM_GENES <- dim(X)[2]
+
+num_train <- 400
+num_test <- n-num_train
+
+train <- sample(1:n, num_train)
+test <- setdiff(1:n, train)
+
+Xtest = X[test,]
+Ytest = Y[test]
+Xtrain = X[train,]
+Ytrain = Y[train]
+
+# Split data for split-conformal inference step
+ntrain <- length(train)
+I1_ind <- sample(1:ntrain, floor(ntrain/2))
+I2_ind <- setdiff(1:ntrain, I1_ind)
+I1 <- Xtrain[I1_ind,]
+I1y <-  Ytrain[I1_ind]
+I2 <- Xtrain[I2_ind,]
+I2y <- Ytrain[I2_ind]
+
+
+num_neighbors <- 10
+alpha <- 0.1
+```
+
+We will use kNN to estimate the conditional probability distribution p(Y|X) with a choice of k = 10. In particular, the scope of our questions here are not so related to the probability distribution. We are mainly interested in the class vs total coverage given that the same estimation procedure is used in both. We have (or will) investigated the probability distribution elsewhere. 
+```{r}
+# We will use kNN to fit p(y|x)
+library(FNN)
+
+kNN_condl_prob <- function(y, x, num_neighbors, xTrain, yTrain){
+  nbhrs = get.knnx(xTrain, x, k=num_neighbors) 
+  return(length(which(yTrain[nbhrs$nn.index] == y))/num_neighbors)
+}
+
+# Compute thresholds for class coverage - Here the phat is the estimated probabilities
+# of the I2 points all pertaining to one class.
+# Hence, this function returns t_y, the class specific threshold value
+thlds <- function(phat, alpha) {
+  S = sort(phat, decreasing=FALSE)
+  return(S[ceiling((length(phat)+1)*alpha-1)])
+}
+```
+
+We first do a simple feature selection step to reduce the huge dimensionality of the dataset. We use a straightforward variance threshold and only take the genes above the 0.9125 quantile in variance. Like with the probability estimation, our method of feature selection is not the main focus of our investigation here; we are interested in class vs total coverage tradeoffs given that the same feature selection and estimation methods are used in both. 
+```{r}
+# Feature selection
+feat_vars <- apply(scale(I1, center=FALSE, scale=colSums(I1)), 2, var)
+qtile = 0.9125
+high_var_ind <- which(feat_vars >= quantile(feat_vars, qtile, na.rm=TRUE))
+print(length(high_var_ind))
+```
+This leaves us with $1766$ genes. 
+
+In this investigation, we are primarily interested in the tradeoffs associated with guaranteeing class specific coverage over total coverage. More precisely, the authors (Sadinle et al.) give methods to bound the total misclassification rate as well as conditional on the class. We imagine there are tradeoffs in the ambiguity of a classifier when one decides to guarantee class coverage. In particular, we expect that the classifier becomes more conservative(i.e.  more ambigious) in order to ensure that atleast one of its predictions is accurate. In contrast, the total coverage only requires that the classifier predict with $1-\alpha$ accuracy **on average**. So if the probability distribution of the data points is heavily biased towards one class whereas another class is much more rare, the classifier is likely to make many more mistakes in the rare class since it will be balanced out by the predominance of the frequent class. We are interested in how this tradeoff plays in the current gene dataset. This is certainly of interest to practioners who may use this algorithm to actually diagnose patients. 
+  The properties of the tradeoffs are certainly dependent on how the data is split between I1/I2. We will investigate this relationship as well.
+
+We are interested in the following questions:
+  * How does the per class error rate of total coverage compare to the guaranteed coverage rate per class? How does this depend on $\alpha$?
+  * How do the ambiguous classifications compare among the class specific coverage and total coverage classifiers?
+  * What is the effect of I1/I2 split (in terms of number of samples) on the ambiguity/null? 
+  * What about pathological configurations of I2, where there are very few samples of one class? How robust is this method?
+  * (Can we ask an inference question?)
+
+We first investigate the misclassification rate.
+Here, we use a conventional I1/I2 split of 50/50. Further, alpha = 0.1. Recall that kNN is used (k = 10) and feat selection is var threshold.
+```{r}
+# Estimate the distribution of p(y|x) - only I1 is allowed for fitting p(y|x)
+phat_I2 <- rep(0, length(I2_ind))
+for(i in 1:length(I2_ind)) {
+  phat_I2[i] <- kNN_condl_prob(I2y[i], t(I2[i, high_var_ind]), num_neighbors, I1[,high_var_ind], I1y)
+}
+
+# Get threshold for total classifier
+total_t <- thlds(phat_I2, alpha)
+
+# Get threshold for class specific classifier
+t_y <- rep(0, 5)
+for(i in 1:5){
+  t_y[i] <- thlds(phat_I2[which(as.double(I2y) == i)], alpha)  
+}
+```
+
+
+```{r}
+# Total Classifier - Classify test data
+results = matrix(0L, ncol=5, nrow=length(test))
+for(i in 1:length(test)) {
+  x = Xtest[i, high_var_ind]
+  
+  index = 1
+  for(tum in 1:5){
+    p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+    if(p >= total_t){
+      results[i, index] = 1
+    }
+    index <- index+1
+  }
+}
+# Count number of points with null classification
+num_null <- length(which(rowSums(results) == 0))
+print(num_null)
+
+# Count number of points with more than 1 classification
+num_ambig <- length(which(rowSums(results) > 1))
+print(num_ambig)
+```
+```{r}
+# Compute total coverage rate
+coverage_rate <- 0
+for(i in 1:length(test)) {
+  if(results[i, Ytest[i]] == 1) {
+    coverage_rate <- coverage_rate + 1
+  }
+}
+coverage_rate <- coverage_rate/length(test)
+coverage_rate
+```
+```{r}
+# Compute class specific coverage rate
+class_coverage_rates <- rep(0, 5)
+for(tum in 1:5){
+  tum_ind = which(Ytest == tumors[tum])
+  
+  for(i in tum_ind) {
+    if(results[i, Ytest[i]] == 1) {
+      class_coverage_rates[tum] <- class_coverage_rates[tum] + 1
+    }
+  }
+  class_coverage_rates[tum] <- class_coverage_rates[tum]/length(tum_ind)
+}
+class_coverage_rates
+```
+
+Oh an interesting result! We see that tumor type 4 has a lower coverage rate than all the others (and certainly falls below $\alpha$).
+For reference, the tumor types are ordered as 
+```{r}
+tumors
+```
+so we see that the classifier does pretty poorly on the "LUAD" tumor type when optimized for total coverage. To understand why, we looked at the distribution of tumor types.
+
+```{r}
+barplot(table(I1y)/length(I1y), ylim=c(0, 1), main="I1")
+barplot(table(I2y)/length(I2y), ylim=c(0, 1), main="I2")
+barplot(table(Ytest)/length(Ytest), ylim=c(0,1), main="Test")
+```
+Hmmm, we have the worst coverage on LUAD but it seems to be well represented in all of parts of the data post-split. Interestingly enough, COAD has the least representation in all three parts, yet the classifier classifies it with 93% accuracy. What is happening here? It is most likely due to the structure of the features and their relation to the LUAD. (I bet if you plotted the first two principal components, LUAD would be very hard to separate from another tumor class). 
+
+We now confirm that our class specific classifier satisfies the $\alpha$ bound.
+```{r}
+# Class Specific Classifier - Classify test data
+class_results = matrix(0L, ncol=5, nrow=length(test))
+for(i in 1:length(test)) {
+  x = Xtest[i, high_var_ind]
+  
+  index = 1
+  for(tum in 1:5){
+    p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+    if(p >= t_y[tum]){
+      class_results[i, index] = 1
+    }
+    index <- index+1
+  }
+}
+# Count number of points with null classification
+num_null <- length(which(rowSums(class_results) == 0))
+print(num_null)
+
+# Count number of points with more than 1 classification
+num_ambig <- length(which(rowSums(class_results) > 1))
+print(num_ambig)
+```
+```{r}
+# Compute class specific coverage rate
+class_spec_coverage_rates <- rep(0, 5)
+for(tum in 1:5){
+  tum_ind = which(Ytest == tumors[tum])
+  
+  for(i in tum_ind) {
+    if(class_results[i, Ytest[i]] == 1) {
+      class_spec_coverage_rates[tum] <- class_spec_coverage_rates[tum] + 1
+    }
+  }
+  class_spec_coverage_rates[tum] <- class_spec_coverage_rates[tum]/length(tum_ind)
+}
+class_spec_coverage_rates
+```
+As expected, the class specific classifier satisfies the misclassification bound (and 88.4% is admissible whereas 84.2% (total coverage) as the deviation between 88.4% and 90% is plausibly explained by finite test set). However, observe that we pay immensely in terms of the ambiguity: ALL individuals are ambiguously classified, as compared to the total coverage classifier which only ambiguously classifies 41 individuals. 
+
+
+We now examine this effect with respect to $\alpha$ constraint. 
+```{r}
+alphas <- seq(0.05, 0.25, 0.0125)
+total_ambigs <- rep(0, length(alphas))
+total_nulls <- rep(0, length(alphas))
+class_ambigs <- rep(0, length(alphas))
+class_nulls <- rep(0, length(alphas))
+total_coverage <- matrix(0, nrow=length(alphas), ncol=5)
+class_condl_coverage <- matrix(0, nrow=length(alphas), ncol=5)
+
+for(a in 1:length(alphas)) {
+  print(alphas[a])
+  
+  # Get thresholds
+  total_t <- thlds(phat_I2, alphas[a])
+  t_y <- rep(0, 5)
+  for(i in 1:5){
+    t_y[i] <- thlds(phat_I2[which(as.double(I2y) == i)], alphas[a])  
+  }
+  
+  ###### Total Classifier - Classify test data ###############
+  results = matrix(0L, ncol=5, nrow=length(test))
+  for(i in 1:length(test)) {
+    x = Xtest[i, high_var_ind]
+    
+    for(tum in 1:5){
+      p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+      if(p >= total_t){
+        results[i, tum] = 1
+      }
+    }
+  }
+  # Count number of points with null classification
+  num_null <- length(which(rowSums(results) == 0))
+  
+  # Count number of points with more than 1 classification
+  num_ambig <- length(which(rowSums(results) > 1))
+  
+  # Compute class specific coverage rate
+  class_coverage_rates <- rep(0, 5)
+  for(tum in 1:5){
+    tum_ind = which(Ytest == tumors[tum])
+    
+    for(i in tum_ind) {
+      if(results[i, Ytest[i]] == 1) {
+        class_coverage_rates[tum] <- class_coverage_rates[tum] + 1
+      }
+    }
+    class_coverage_rates[tum] <- class_coverage_rates[tum]/length(tum_ind)
+  }
+  
+  # Store results
+  total_ambigs[a] <- num_ambig
+  total_nulls[a] <- num_null
+  total_coverage[a,] <- class_coverage_rates
+  print(total_coverage)
+  ############################################################
+  
+  ########### Class Condl Classifier - Classify test data #########
+  # Class Specific Classifier - Classify test data
+  class_results = matrix(0L, ncol=5, nrow=length(test))
+  for(i in 1:length(test)) {
+    x = Xtest[i, high_var_ind]
+    
+    for(tum in 1:5){
+      p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+      if(p >= t_y[tum]){
+        class_results[i, tum] = 1
+      }
+    }
+  }
+  # Count number of points with null classification
+  num_null <- length(which(rowSums(class_results) == 0))
+  
+  # Count number of points with more than 1 classification
+  num_ambig <- length(which(rowSums(class_results) > 1))
+  
+  # Compute class specific coverage rate
+  class_spec_coverage_rates <- rep(0, 5)
+  for(tum in 1:5){
+    tum_ind = which(Ytest == tumors[tum])
+    
+    for(i in tum_ind) {
+      if(class_results[i, Ytest[i]] == 1) {
+        class_spec_coverage_rates[tum] <- class_spec_coverage_rates[tum] + 1
+      }
+    }
+    class_spec_coverage_rates[tum] <- class_spec_coverage_rates[tum]/length(tum_ind)
+  }
+
+  # Store results
+  class_ambigs[a] <- num_ambig
+  class_nulls[a] <- num_null
+  class_condl_coverage[a,] <- class_spec_coverage_rates
+  print(class_condl_coverage)
+  ################################################################
+}
+
+```
+
+
+```{r}
+matplot(alphas, total_coverage, pch=1, ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Total Classifier")
+lines(alphas, 1-alphas, col=10)
+legend("bottomleft", legend=c(tumors, "Error Bound"), pch=c(rep(1, 5), 19), col=c(1:5, 10))
+```
+
+```{r}
+matplot(alphas, class_condl_coverage, pch=1, ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Class Conditional Classifier")
+lines(alphas, 1-alphas, col=10)
+legend("bottomleft", legend=c(tumors, "Error Bound"), pch=c(rep(1, 5), 19), col=c(1:5, 10))
+```
+what is happening??? class specific classifier failed??? this cannot be finite test set effect... (unstable at high alpha?? but its supposed to be more generous!!!!!)
+
+We could increase the training set to allow more samples in I2 so that t_y is better estimated. 
+
+
+```{r}
+plot(alphas, total_ambigs, ylim=c(0, 400))
+plot(alphas, class_ambigs, ylim=c(0, 400))
+```
+
+
+```{r}
+plot(alphas, total_nulls, ylim=c(0, 400))
+plot(alphas, class_nulls, ylim=c(0, 400))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
