@@ -65,15 +65,15 @@ thlds <- function(phat, alpha) {
 }
 ```
 
-We first do a simple feature selection step to reduce the huge dimensionality of the dataset. We use a straightforward variance threshold and only take the genes above the 0.9125 quantile in variance. Like with the probability estimation, our method of feature selection is not the main focus of our investigation here; we are interested in class vs total coverage tradeoffs given that the same feature selection and estimation methods are used in both. 
+We first do a simple feature selection step to reduce the huge dimensionality of the dataset. We use a straightforward variance threshold and only take the genes above the 0.9 quantile in variance. Like with the probability estimation, our method of feature selection is not the main focus of our investigation here; we are interested in class vs total coverage tradeoffs given that the same feature selection and estimation methods are used in both. 
 ```{r}
 # Feature selection
 feat_vars <- apply(scale(I1, center=FALSE, scale=colSums(I1)), 2, var)
-qtile = 0.9125
+qtile = 0.90
 high_var_ind <- which(feat_vars >= quantile(feat_vars, qtile, na.rm=TRUE))
 print(length(high_var_ind))
 ```
-This leaves us with $1766$ genes. 
+This leaves us with $2019$ genes. 
 
 In this investigation, we are primarily interested in the tradeoffs associated with guaranteeing class specific coverage over total coverage. More precisely, the authors (Sadinle et al.) give methods to bound the total misclassification rate as well as conditional on the class. We imagine there are tradeoffs in the ambiguity of a classifier when one decides to guarantee class coverage. In particular, we expect that the classifier becomes more conservative(i.e.  more ambigious) in order to ensure that atleast one of its predictions is accurate. In contrast, the total coverage only requires that the classifier predict with $1-\alpha$ accuracy **on average**. So if the probability distribution of the data points is heavily biased towards one class whereas another class is much more rare, the classifier is likely to make many more mistakes in the rare class since it will be balanced out by the predominance of the frequent class. We are interested in how this tradeoff plays in the current gene dataset. This is certainly of interest to practioners who may use this algorithm to actually diagnose patients. 
   The properties of the tradeoffs are certainly dependent on how the data is split between I1/I2. We will investigate this relationship as well.
@@ -90,7 +90,7 @@ Here, we use a conventional I1/I2 split of 50/50. Further, alpha = 0.1. Recall t
 ```{r}
 # Estimate the distribution of p(y|x) - only I1 is allowed for fitting p(y|x)
 phat_I2 <- rep(0, length(I2_ind))
-for(i in 1:length(I2_ind)) {
+for(i in 1:(length(I2_ind))) {
   phat_I2[i] <- kNN_condl_prob(I2y[i], t(I2[i, high_var_ind]), num_neighbors, I1[,high_var_ind], I1y)
 }
 
@@ -208,12 +208,126 @@ for(tum in 1:5){
 }
 class_spec_coverage_rates
 ```
-As expected, the class specific classifier satisfies the misclassification bound (and 88.4% is admissible whereas 84.2% (total coverage) as the deviation between 88.4% and 90% is plausibly explained by finite test set). However, observe that we pay immensely in terms of the ambiguity: ALL individuals are ambiguously classified, as compared to the total coverage classifier which only ambiguously classifies 41 individuals. 
+As expected, the class specific classifier satisfies the misclassification bound (and 88.4% is admissible whereas 84.2% (total coverage) as the deviation between 88.4% and 90% is plausibly explained by finite test set). Interestingly, we do not pay in terms of the ambiguity tradeoff. We will investigate to what extent we can gain confidence in our prediction conditonal on class while maintaining low ambiguity. In particular, this will change with the $\alpha$ and $I1/I2$ configurations.
 
-
-We now examine this effect with respect to $\alpha$ constraint. 
+We now examine this effect with respect to $\alpha$ constraint. First, we will see the effects on the training data and choose hypotheses to test. 
 ```{r}
+# Test training data to see effects and choose hypotheses to test
 alphas <- seq(0.05, 0.25, 0.0125)
+train_total_ambigs <- rep(0, length(alphas))
+train_total_nulls <- rep(0, length(alphas))
+train_class_ambigs <- rep(0, length(alphas))
+train_class_nulls <- rep(0, length(alphas))
+train_total_coverage <- matrix(0, nrow=length(alphas), ncol=5)
+train_class_condl_coverage <- matrix(0, nrow=length(alphas), ncol=5)
+
+for(a in 1:length(alphas)) {
+  print(alphas[a])
+  
+  # Get thresholds
+  total_t <- thlds(phat_I2, alphas[a])
+  t_y <- rep(0, 5)
+  for(i in 1:5){
+    t_y[i] <- thlds(phat_I2[which(as.double(I2y) == i)], alphas[a])  
+  }
+  
+  ###### Total Classifier - Classify train data ###############
+  results = matrix(0L, ncol=5, nrow=length(train))
+  for(i in 1:length(train)) {
+    x = Xtrain[i, high_var_ind]
+    
+    for(tum in 1:5){
+      p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+      if(p >= total_t){
+        results[i, tum] = 1
+      }
+    }
+  }
+  # Count number of points with null classification
+  num_null <- length(which(rowSums(results) == 0))
+  
+  # Count number of points with more than 1 classification
+  num_ambig <- length(which(rowSums(results) > 1))
+  
+  # Compute class specific coverage rate
+  class_coverage_rates <- rep(0, 5)
+  for(tum in 1:5){
+    tum_ind = which(Ytrain == tumors[tum])
+    
+    for(i in tum_ind) {
+      if(results[i, Ytrain[i]] == 1) {
+        class_coverage_rates[tum] <- class_coverage_rates[tum] + 1
+      }
+    }
+    class_coverage_rates[tum] <- class_coverage_rates[tum]/length(tum_ind)
+  }
+  
+  # Store results
+  train_total_ambigs[a] <- num_ambig
+  train_total_nulls[a] <- num_null
+  train_total_coverage[a,] <- class_coverage_rates
+  ############################################################
+  
+  ########### Class Condl Classifier - Classify train data #########
+  # Class Specific Classifier - Classify train data
+  class_results = matrix(0L, ncol=5, nrow=length(train))
+  for(i in 1:length(train)) {
+    x = Xtrain[i, high_var_ind]
+    
+    for(tum in 1:5){
+      p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+      if(p >= t_y[tum]){
+        class_results[i, tum] = 1
+      }
+    }
+  }
+  # Count number of points with null classification
+  num_null <- length(which(rowSums(class_results) == 0))
+  
+  # Count number of points with more than 1 classification
+  num_ambig <- length(which(rowSums(class_results) > 1))
+  
+  # Compute class specific coverage rate
+  class_spec_coverage_rates <- rep(0, 5)
+  for(tum in 1:5){
+    tum_ind = which(Ytrain == tumors[tum])
+    
+    for(i in tum_ind) {
+      if(class_results[i, Ytrain[i]] == 1) {
+        class_spec_coverage_rates[tum] <- class_spec_coverage_rates[tum] + 1
+      }
+    }
+    class_spec_coverage_rates[tum] <- class_spec_coverage_rates[tum]/length(tum_ind)
+  }
+
+  # Store results
+  train_class_ambigs[a] <- num_ambig
+  train_class_nulls[a] <- num_null
+  train_class_condl_coverage[a,] <- class_spec_coverage_rates
+  ################################################################
+}
+```
+
+```{r}
+matplot(alphas, train_total_coverage, pch=1, ylim=c(0.6, 1), ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Total Classifier - Train")
+lines(alphas, 1-alphas, col=10)
+legend("bottomleft", legend=c(tumors, "Error Bound"), pch=c(rep(1, 5), 19), col=c(1:5, 10))
+
+matplot(alphas, train_class_condl_coverage, pch=1, ylim=c(0.6, 1), ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Class Conditional Classifier - Train")
+lines(alphas, 1-alphas, col=10)
+legend("bottomleft", legend=c(tumors, "Error Bound"), pch=c(rep(1, 5), 19), col=c(1:5, 10))
+```
+
+```{r}
+plot(alphas, train_total_ambigs, ylim=c(0, 400), ylab="# Ambiguous", xlab="alpha", main="Total Classifier - Ambiguity by alpha - Train")
+plot(alphas, train_class_ambigs, ylim=c(0, 400), ylab="# Ambiguous", xlab="alpha", main="Class Specific - Ambiguity by alpha - Train")
+plot(alphas, train_total_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Total Classifier - Null by alpha - Train")
+plot(alphas, train_class_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Class Specific - Null by alpha - Train")
+```
+The results of the training set show that LUAD is not classified very well by the total classifier. Further, we see that the class specific classifier has tremendous ambiguity for very extreme values of $\alpha$ (see below for intuition - especially about affording error). From these results, we hypothesize that LUAD is difficult to classify. Since $\alpha$ is large, the total classifier can afford to incur the error rate, and so does not output ambiguous classifications. To this end, we will test some hypotheses on the test data. In particular, we hypothesize that the LUAD data points are highly correlated with some other tumor type. Further, we hypothesize that the mean expression levels of LUAD are very similar to some other tumor type, and thus are misclassified. Note here that we do not have a good explanation (or formulation of question) for why LUAD is the one to be misclassified, rather than the tumor type it is similar to. This will require more thought... 
+
+Now we run the same on the test set. 
+```{r}
 total_ambigs <- rep(0, length(alphas))
 total_nulls <- rep(0, length(alphas))
 class_ambigs <- rep(0, length(alphas))
@@ -313,34 +427,39 @@ for(a in 1:length(alphas)) {
 
 
 ```{r}
-matplot(alphas, total_coverage, pch=1, ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Total Classifier")
+matplot(alphas, total_coverage, pch=1, ylim=c(0.6, 1), ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Total Classifier")
 lines(alphas, 1-alphas, col=10)
 legend("bottomleft", legend=c(tumors, "Error Bound"), pch=c(rep(1, 5), 19), col=c(1:5, 10))
 ```
 
 ```{r}
-matplot(alphas, class_condl_coverage, pch=1, ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Class Conditional Classifier")
+matplot(alphas, class_condl_coverage, pch=1, ylim=c(0.6, 1), ylab="Coverage Rate", xlab="alpha", main="Class Specific Coverage - Class Conditional Classifier")
 lines(alphas, 1-alphas, col=10)
 legend("bottomleft", legend=c(tumors, "Error Bound"), pch=c(rep(1, 5), 19), col=c(1:5, 10))
 ```
-what is happening??? class specific classifier failed??? this cannot be finite test set effect... (unstable at high alpha?? but its supposed to be more generous!!!!!)
 
-We could increase the training set to allow more samples in I2 so that t_y is better estimated. 
-
+Looks good! We guarantee our error bound with the class specific classifier, whereas the total classifier does pretty terribly for the LUAD tumor. Interestingly, all tumors except for LUAD are classified within the error bound for the total classifier. 
+  Why might this be the case? For some reason, it is easier to correctly predict all of the other tumor types but fail for LUAD. Further, observe that the total classifier has no ambiguous classificatoins for larger values of $\alpha$. This means that LUAD is being incorrectly classified as another tumor, and the total classifier does not output an ambiguous instance since $\alpha$ is large and so can afford to make predictions without tempering with ambiguity. 
+  Another interesting observation is that the LUAD classification fails appreciably only for large $\alpha > 0.1$, and drops from there. This seems to be counterintuitive, in that the total classifier fails to meet a more generous constraint. In contrast, for very strict $\alpha$, the total classifier is able to meet the error bound. However, this observation can be explained as follows. With a larger $\alpha$, the total classifier is able to classify with less ambiguity and can afford to incur the misclassification loss. Now since the total classifer only guarantees a bound on the **total** misclassification (i.e. on average), the classifier ends up misclassifying many instances of LUAD while making up for this inaccuracy by accurately predicting the other tumor types. Further, since $\alpha$ is large, the classifier can afford to incur larger misclassfication error, and thus dumps all of it into LUAD. As such, the total classifier meets the total coverage constraint, but falls very short for LUAD. 
+  This is controlled for in the Class Specific Classifier. We see that in all tumor types, the $\alpha$ bound is satisfied. The slight deviations in the coverage rate for COAD are slight enough to be explained by the finiteness of the test data. 
+    The guarantee in coverage rate comes at a tremendous cost for low alpha. In particular, observe that we have $401$ ambiguous classifications; this is the entire test set. However, observe that for $alpha > 0.1125$, there is an immediate decrease in ambiguity to obtain $0$ ambiguous classifications. Therefore, the tradeoff between ambiguity only exists at very extreme values of $alpha$, and drops off instantly when there is room to afford errors in classification. In particular, we see that for large $\alpha$, the class specific classifier guarantees the desired bound while matching the total classifier in ambiguity. This seems to be a stricly dominant procedure (albeit this is after looking at results of test data), but the results match our intuition. With large $\alpha$, there is enough room for error that the class specific classifier can minimize ambiguity while still satisfying the desired error bound. 
 
 ```{r}
-plot(alphas, total_ambigs, ylim=c(0, 400))
-plot(alphas, class_ambigs, ylim=c(0, 400))
+plot(alphas, total_ambigs, ylim=c(0, 400), ylab="# Ambiguous", xlab="alpha", main="Total Classifier - Ambiguity by alpha")
+plot(alphas, class_ambigs, ylim=c(0, 400), ylab="# Ambiguous", xlab="alpha", main="Class Specific - Ambiguity by alpha")
 ```
 
 
 ```{r}
-plot(alphas, total_nulls, ylim=c(0, 400))
-plot(alphas, class_nulls, ylim=c(0, 400))
+plot(alphas, total_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Total Classifier - Null by alpha")
+plot(alphas, class_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Class Specific - Null by alpha")
 ```
 
+We are now interested in why classifying LUAD is difficult for the total classifier. In particular, it seems that the difficulty of classifying LUAD is what drives the ambiguity of class specific classifier for extreme values of $\alpha$. 
 
-
+```{r}
+princomp(Xtest[,high_var_ind])
+```
 
 
 
