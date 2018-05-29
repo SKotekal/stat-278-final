@@ -324,7 +324,7 @@ plot(alphas, train_class_ambigs, ylim=c(0, 400), ylab="# Ambiguous", xlab="alpha
 plot(alphas, train_total_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Total Classifier - Null by alpha - Train")
 plot(alphas, train_class_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Class Specific - Null by alpha - Train")
 ```
-The results of the training set show that LUAD is not classified very well by the total classifier. Further, we see that the class specific classifier has tremendous ambiguity for very extreme values of $\alpha$ (see below for intuition - especially about affording error). From these results, we hypothesize that LUAD is difficult to classify. Since $\alpha$ is large, the total classifier can afford to incur the error rate, and so does not output ambiguous classifications. To this end, we will test some hypotheses on the test data. In particular, we hypothesize that the LUAD data points are highly correlated with some other tumor type. Further, we hypothesize that the mean expression levels of LUAD are very similar to some other tumor type, and thus are misclassified. Note here that we do not have a good explanation (or formulation of question) for why LUAD is the one to be misclassified, rather than the tumor type it is similar to. This will require more thought... 
+The results of the training set show that LUAD is not classified very well by the total classifier. Further, we see that the class specific classifier has tremendous ambiguity for very extreme values of $\alpha$ (see below for intuition - especially about affording error). From these results, we hypothesize that LUAD is difficult to classify. Since $\alpha$ is large, the total classifier can afford to incur the error rate, and so does not output ambiguous classifications. To this end, we will test some hypotheses on the test data. In particular, we hypothesize that the LUAD data points are highly correlated with some other tumor type. Further, we hypothesize that the mean distance in feature space between LUAD points and another tumor type is significantly small. Note here that we do not have a good explanation (or formulation of question) for why LUAD is the one to be misclassified, rather than the tumor type it is similar to. This will require more thought... 
 
 Now we run the same on the test set. 
 ```{r}
@@ -438,7 +438,7 @@ lines(alphas, 1-alphas, col=10)
 legend("bottomleft", legend=c(tumors, "Error Bound"), pch=c(rep(1, 5), 19), col=c(1:5, 10))
 ```
 
-Looks good! We guarantee our error bound with the class specific classifier, whereas the total classifier does pretty terribly for the LUAD tumor. Interestingly, all tumors except for LUAD are classified within the error bound for the total classifier. 
+Looks good! We guarantee our error bound with the class specific classifier, whereas the total classifier does pretty terribly for the LUAD tumor. Interestingly, all tumors except for LUAD are classified within the error bound for the total classifier, and we recapitulate the result found in the training set. 
   Why might this be the case? For some reason, it is easier to correctly predict all of the other tumor types but fail for LUAD. Further, observe that the total classifier has no ambiguous classificatoins for larger values of $\alpha$. This means that LUAD is being incorrectly classified as another tumor, and the total classifier does not output an ambiguous instance since $\alpha$ is large and so can afford to make predictions without tempering with ambiguity. 
   Another interesting observation is that the LUAD classification fails appreciably only for large $\alpha > 0.1$, and drops from there. This seems to be counterintuitive, in that the total classifier fails to meet a more generous constraint. In contrast, for very strict $\alpha$, the total classifier is able to meet the error bound. However, this observation can be explained as follows. With a larger $\alpha$, the total classifier is able to classify with less ambiguity and can afford to incur the misclassification loss. Now since the total classifer only guarantees a bound on the **total** misclassification (i.e. on average), the classifier ends up misclassifying many instances of LUAD while making up for this inaccuracy by accurately predicting the other tumor types. Further, since $\alpha$ is large, the classifier can afford to incur larger misclassfication error, and thus dumps all of it into LUAD. As such, the total classifier meets the total coverage constraint, but falls very short for LUAD. 
   This is controlled for in the Class Specific Classifier. We see that in all tumor types, the $\alpha$ bound is satisfied. The slight deviations in the coverage rate for COAD are slight enough to be explained by the finiteness of the test data. 
@@ -455,24 +455,232 @@ plot(alphas, total_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Tot
 plot(alphas, class_nulls, ylim=c(0, 400), ylab="# Null", xlab="alpha", main="Class Specific - Null by alpha")
 ```
 
-We are now interested in why classifying LUAD is difficult for the total classifier. In particular, it seems that the difficulty of classifying LUAD is what drives the ambiguity of class specific classifier for extreme values of $\alpha$. 
+As we said above, we are now interested in why classifying LUAD is difficult for the total classifier. In particular, it seems that the difficulty of classifying LUAD is what drives the ambiguity of class specific classifier for extreme values of $\alpha$.
+  As we decided by looking at the training data, we will test some hypotheses for the results observed on the test data. In particular, we hypothesize that the mean distance in feature space between LUAD points and another tumor type is significantly smaller than the mean distance to other tumor types. Recall that we are estimating $p(Y|X)$ with $kNN$ and so we are interested in relative distance rather than absolute distance. We also ask if this classification of LUAD is consistently below the guarantee bound for the total classifier (at some fixed alpha). Also, we ask if the ambiguity count of the class specific classifier at alpha=0.1 is consistently 0 (or close to). 
+  
+(Note here that we do not have a good explanation (or formulation of question) for why LUAD is the one to be misclassified, rather than the tumor type it is similar to. This will require more thought.)
+
+More concretely, the hypotheses we test:
+  * Mean distance in feature space between LUAD and another tumor type is significantly smaller than mean distance to other tumor types.
+  * Misclassification of LUAD is significantly below error bound in total classifier. 
+  * Ambiguity of class specific classifier is 0 at alpha=0.1
+
+
+We proceed in order. The first question has the following hypothesis testing structure:    
+$$
+  H_{0, i} : \text{Mean pairwise distance between LUAD and tumor type i is equal to mean distance between LUAD and non-tumor type i} \\
+  H_{1,i} : \text{Mean pairwise distance between LUAD and tumor type } i \text{ individual's feature vectors is significantly smaller than mean distance to non-tumor type i}
+$$
+
+Here, $i \in \{1, 2, 3, 5}$ and correspond the ordered list of tumors ("BRCA", "COAD","KIRC", "LUAD", "PRAD"). Note that we do not consider $i = 4$ since distance between LUAD and LUAD is 0. Observe here that we have $4$ hypotheses to test. Further, note that we generated these hypotheses from looking at our training set, and are testing them on fresh test data. As such, no additional correction is needed.
+
+Our test statistic is as follows. We compute Euclidean distance for each pair consisting of one gene vector from LUAD and one from tumor type i. We then compute the mean of these pairwise distances, and use this in the signficance testing. P-values are computed via permutation test.
+  The permutation test is constructed as follows:
+    1) First, compute mean distance between LUAD and tumor type i 
+    2) Repeat 1000x:
+        i) Permute all non LUAD individuals
+       ii) Compute mean distance between LUAD and indices that were previously labeled tumor type i
+      iii) Collect values to create distribution.
+    3) Compute p-value
+```{r}
+library(proxy)
+
+## Test distance hypothesis
+nperm = 1000
+pvals_perm = c()
+luad_ind = which(Ytest == "LUAD")
+non_luad_ind = which(Ytest != "LUAD")
+for(tum in tumors) {
+  if(tum == "LUAD"){
+    next
+  }
+  tumor_ind <- which(Ytest == tum)
+  non_tumor_ind <- which(Ytest != tum)
+  
+  mean_d <- mean((dist(Xtest[luad_ind, high_var_ind], Xtest[tumor_ind,high_var_ind])))
+  print(mean_d)
+  
+  perm_d <- rep(0, nperm)
+  perms <- apply(matrix(rnorm(nperm*(length(non_luad_ind))), nperm, length(non_luad_ind)), 1, order) # each column is one permutation
+  for(j in 1:nperm){
+    perm_d[j] <- mean((dist(Xtest[luad_ind, high_var_ind], Xtest[non_luad_ind[perms[,j]],high_var_ind])))
+  }
+  pvals_perm = c(pvals_perm, (1 + sum(perm_d <= mean_d))/(1+nperm)) # distance is always nonnegative so don't have to worry about negatives
+  #pvals_perm = c(pvals_perm, (1 + rowSums(abs(meandiffs_perm) >= abs(meandiffs)%*%t(rep(1, nperm))))/(1+nperm))
+}
+
+```
+```{r}
+pvals_perm ## Still needs to be corrected
+```
+
+We see that LUAD is very close to BRCA and PRAD (which our dumb visualization shows below). However, we cannot conclude anything yet as these pvalues must be corrected due to the multiple testing setting. We will do this correction after we have computed pvalues for everything we wish to test. 
 
 ```{r}
-princomp(Xtest[,high_var_ind])
+# A really dumb visualization. Take the first 400 high_var genes as features and do PCA. Project onto first 2 components
+# We see that L and B are pretty mashed together. However, when you add in all the other genes (and pcs) they separate. 
+tpca <- princomp(Xtest[,high_var_ind[1:400]])
+Ytest.color <- rep('red',n)
+Ytest.color[which(Y==2)] <- 'gold'
+Ytest.color[which(Y==3)] <- 'blue'
+
+
+plot(tpca$score[,1], tpca$score[,2],col=Ytest.color,pch=as.character(Ytest),xlab='Principal Component 1',ylab='Principal Component 2',
+	cex.axis=1.5,cex.lab=1.8,lwd=3,cex=1.5,main="Iris Data",cex.main=2)
+```
+
+We now test the significance of misclassification and ambiguity. we could also test to see if the misclassification is significantly bad of the test classifier -> repeatedly draw 200 size samples from test data, run test classifier, and see how far away from the guarantee bound it really is => we can fix an alpha and do for all tumors.
+
+```{r}
+## Permute 1:400
+alphas = seq(0.05, 0.15, 0.0125)
+perm_ind <- order(rnorm(length(test)))
+mean_total_coverage_rates = matrix(nrow=length(alphas), ncol=5)
+sdev_total_coverage_rates = matrix(nrow=length(alphas), ncol=5)
+for(a in 1:length(alphas)){
+  # Get thresholds
+  total_t <- thlds(phat_I2, alphas[a])
+  t_y <- rep(0, 5)
+  for(i in 1:5){
+    t_y[i] <- thlds(phat_I2[which(as.double(I2y) == i)], alphas[a])  
+  }
+  
+  total_ambigs <- rep(0, 20)
+  total_nulls <- rep(0, 20)
+  total_coverage <- matrix(0, nrow=20, ncol=5)
+  
+  for(batch in 1:20){ 
+    test_batch = Xtest[perm_ind[(20*(batch-1)+1):(20*batch)],high_var_ind]
+    test_batch_class = Ytest[perm_ind[(20*(batch-1)+1):(20*batch)]]
+    
+    ###### Total Classifier - Classify batch of test data ###############
+    results = matrix(0L, ncol=5, nrow=20)
+    for(i in 1:20) {
+      x = test_batch[i,]
+      
+      for(tum in 1:5){
+        p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+        if(p >= total_t){
+          results[i, tum] = 1
+        }
+      }
+    }
+    
+    # Count number of points with null classification
+    prop_null <- length(which(rowSums(results) == 0))/20
+    
+    # Count number of points with more than 1 classification
+    prop_ambig <- length(which(rowSums(results) > 1))/20
+    
+    # Compute class specific coverage rate
+    class_coverage_rates <- rep(0, 5)
+    for(tum in 1:5){
+      tum_ind = which(test_batch_class == tumors[tum])
+      if(length(tum_ind) == 0){
+        class_coverage_rates[tum] <- 1
+      }
+      else{
+        for(j in 1:length(tum_ind)) {
+          if(results[tum_ind[j], tum] == 1) {
+            class_coverage_rates[tum] <- class_coverage_rates[tum] + 1
+          }
+        }
+        class_coverage_rates[tum] <- class_coverage_rates[tum]/length(tum_ind)
+      }
+    }
+    
+    # Store results
+    total_ambigs[batch] <- prop_ambig
+    total_nulls[batch] <- prop_null
+    total_coverage[batch,] <- class_coverage_rates
+  }
+  
+  mean_total_coverage_rates[a,] <- colMeans(total_coverage)
+  sdev_total_coverage_rates[a, ] <- apply(total_coverage, 2, sd)
+}
+
+```
+
+```{r}
+# Test hypotheses using t-test with 19 degrees of freedom
+t_pvals <- matrix(0, nrow=length(alphas), ncol=5)
+for(a in 1:length(alphas)){
+  for(tum in 1:5) {
+    # n = 10 and df = 19
+    stat <- (mean_total_coverage_rates[a, tum] - (1-alphas[a]))/(sdev_total_coverage_rates[a, tum]/(20**0.5))
+    t_pvals[a, tum] = pt(stat, df=19)
+  }
+}
+print(t_pvals)
 ```
 
 
+We now test the hypothesis that the average proportion of ambiguous classifications is greater than 0
+```{r}
+mean_class_ambig = rep(0, length(alphas))
+sdev_class_ambig = rep(0, length(alphas))
+for(a in 1:length(alphas)){
+  # Get thresholds
+  t_y <- rep(0, 5)
+  for(i in 1:5){
+    t_y[i] <- thlds(phat_I2[which(as.double(I2y) == i)], alphas[a])  
+  }
+  
+  ambigs <- rep(0, 20)
+  nulls <- rep(0, 20)
+
+  for(batch in 1:20){ 
+    test_batch = Xtest[perm_ind[(20*(batch-1)+1):(20*batch)],high_var_ind]
+    test_batch_class = Ytest[perm_ind[(20*(batch-1)+1):(20*batch)]]
+    
+    ###### Total Classifier - Classify batch of test data ###############
+    class_results = matrix(0L, ncol=5, nrow=length(test))
+    for(i in 1:20) {
+      x = test_batch[i,]
+      
+      for(tum in 1:5){
+        p <- kNN_condl_prob(tumors[tum], t(x), num_neighbors, I1[,high_var_ind], I1y)
+        if(p >= t_y[tum]){
+          class_results[i, tum] = 1
+        }
+      }
+    }
+    # Count number of points with null classification
+    prop_null <- length(which(rowSums(class_results) == 0))/20
+    
+    # Count number of points with more than 1 classification
+     prop_ambig <- length(which(rowSums(class_results) > 1))/20
+    
+    # Store results
+    ambigs[batch] <- prop_ambig
+    nulls[batch] <- prop_null
+  }
+  
+  mean_class_ambig[a] <- mean(ambigs)
+  sdev_class_ambig[a] <- sd(ambigs)
+}
+```
+
+```{r}
+print(alphas)
+print(mean_class_ambig)
+print(sdev_class_ambig)
+```
+We see that there is 0 standard deviation in the number of ambiguous classifications for each value of alpha. This corresponds to a p-value of 1. We shall include this in our BH correction in order to accurately deal with the multiple testing problem. 
 
 
+```{r}
+# pvals_perm
+# t_pvals
+# rep(1, length(alphas))
+adjusted <- p.adjust(c(pvals_perm, c(t(t_pvals)), rep(1, length(alphas))), method=c("BH"))
+adjusted_pvals_perm <- adjusted[1:length(pvals_perm)]
+adjusted_t_pvals <- matrix(adjusted[(length(pvals_perm)+1):(length(pvals_perm)+length(c(t_pvals)))], nrow=dim(t_pvals)[1], ncol=dim(t_pvals)[2],byrow=TRUE)
+```
 
-
-
-
-
-
-
-
-
-
+```{r}
+print(adjusted_pvals_perm)
+print(adjusted_t_pvals)
+```
 
 
