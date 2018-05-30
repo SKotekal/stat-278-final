@@ -1,0 +1,278 @@
+---
+title: "Dimensionality: Meaningful Predictions and Estimating P(Y|X)"
+output: html_notebook
+---
+```{r}
+## Read Data from csv files
+
+labels = read.csv('TCGA-PANCAN-HiSeq-801x20531/labels.csv')[,-1] # labels[i] = tumor type for patient #i (5 types: BRCA, COAD, KIRC, LUAD, PRAD)
+data = read.csv('TCGA-PANCAN-HiSeq-801x20531/data.csv')[,-1]
+data = data[,which(colSums(data!=0)>0)] # removing genes with zero expression level across all patients
+colnames(data) = NULL
+# 801 patients, 20264 genes
+```
+
+```{r}
+# Set up data
+set.seed(278)
+X = as.matrix(data) 
+Y = labels
+n = length(Y)
+tumors <- c("BRCA", "COAD", "KIRC", "LUAD", "PRAD")
+NUM_GENES <- dim(X)[2]
+
+num_train <- 400
+num_test <- n-num_train
+
+train <- sample(1:n, num_train)
+test <- setdiff(1:n, train)
+
+Xtest = X[test,]
+Ytest = Y[test]
+Xtrain = X[train,]
+Ytrain = Y[train]
+
+# Split data for split-conformal inference step
+ntrain <- length(train)
+I1_ind <- sample(1:ntrain, floor(ntrain/2))
+I2_ind <- setdiff(1:ntrain, I1_ind)
+I1 <- Xtrain[I1_ind,]
+I1y <-  Ytrain[I1_ind]
+I2 <- Xtrain[I2_ind,]
+I2y <- Ytrain[I2_ind]
+
+
+num_neighbors <- 10
+alpha <- 0.1
+```
+
+```{r}
+# Estimate p(Y|X) by fitting logistic LASSO
+library(glmnet)
+fit = glmnet(I1, I1y, family="multinomial", type.multinomial="grouped")
+```
+
+```{r}
+df <- fit$df
+dev <- fit$dev
+lambda <- fit$lambda
+plot(df, dev, xlab="# Features", ylab="% Deviance Explained", main="Features and Deviance Explained - Logistic LASSO")
+```
+
+
+```{r}
+# Compute thresholds
+thlds <- function(phat, alpha) {
+  S = sort(phat, decreasing=FALSE)
+  return(S[ceiling((length(phat)+1)*alpha-1)])
+}
+
+# Estimate the distribution of p(y|x) - only I1 is allowed for fitting p(y|x)
+lasso_response <- predict(fit, newx=I2, type="response", s=lambda)
+t_vals <- rep(0, length(lambda))
+for(l in 1:length(lambda)){
+  phat_I2 <- c()
+  for(i in 1:length(I2y)){
+    phat_I2 <- c(phat_I2, lasso_response[i,I2y[i], l])
+  }
+  t_vals[l] <- thlds(phat_I2, alpha)
+}
+```
+
+```{r}
+plot(df, t_vals, xlab="# Features", ylab="Classifier Decision Threshold", main="Decision Threshold by # Features - alpha = 0.1")
+```
+
+```{r}
+# Classify train data
+train_ambigs = rep(0, length(lambda))
+train_nulls = rep(0, length(lambda))
+train_coverage_rate = rep(0, length(lambda))
+lasso_response_train <- predict(fit, newx=Xtrain, type="response", s=lambda)
+residuals <- matrix(0, nrow=length(train), ncol=length(lambda))
+for(l in 1:length(lambda)){
+  results = matrix(0L, ncol=5, nrow=length(train))
+  
+  for(i in 1:length(train)) {
+    for(tum in 1:length(tumors)){
+      if(lasso_response_train[i,tum,l] >= t_vals[l]){
+        results[i, tum] = 1
+      }
+    }
+    residuals[i, l] <- 1.0 - lasso_response_train[i,Ytrain[i],l]
+  }
+  
+  # Count number of points with null classification
+  num_null <- length(which(rowSums(results) == 0))
+  train_nulls[l] <- num_null
+  
+  # Count number of points with more than 1 classification
+  num_ambig <- length(which(rowSums(results) > 1))
+  train_ambigs[l] <- num_ambig
+  
+  # Compute coverage rate
+  coverage_rate <- 0
+  for(i in 1:length(train)) {
+    if(results[i, Ytrain[i]] == 1) {
+      coverage_rate <- coverage_rate + 1
+    }
+  }
+  train_coverage_rate[l] <- coverage_rate/length(test)
+}
+```
+
+```{r}
+plot(df, train_ambigs, xlab="# Features", ylab="# Ambiguous Classifications", main="Train - # Ambiguous by # Features")
+plot(df, train_nulls, xlab="# Features", ylab="# Null Classifications", main="Train - # Null by # Features")
+plot(df, train_coverage_rate, ylim=c(0.8, 1.0), xlab="# Features", ylab="Coverage Rate", main = "Train - Coverage Rate by # Features")
+```
+
+```{r}
+rmse <- rep(0, length(lambda))
+for(l in 1:length(lambda)){
+  rmse[l] <- (1/length(train)*sum(residuals[,l]**2))**0.5
+}
+
+plot(df, rmse, xlab="# Features", ylab="Root-Mean-Square-Error", main="Root-Mean-Square-Error by # Features - Training Data")
+```
+Root-Mean-Square-Error (RMSE) is computed and shown above. This is given by 
+\[
+  RMSE(f) = \sqrt{\frac{1}{N} \sum_{i\in Xtrain} y_i - p(y_i|x_i)} = \sqrt{\frac{1}{N} \sum_{i\in Xtrain} 1 - p(y_i|x_i)}
+\]
+where $p(\cdot|\cdot)$ is the estimated probability distribution by logistic LASSO. 
+
+
+Check correlation of genes with residuals.
+
+```{r}
+corr_genes <- matrix(0, nrow=length(lambda), ncol=NUM_GENES)
+max_mag_corr <- rep(0, length(lambda))
+for(l in 1:length(lambda)){
+  correlations <- rep(0, NUM_GENES)
+  for(i in 1:NUM_GENES) {
+    if(sd(Xtrain[,i]) == 0){
+      next
+    }
+    correlations[i] <- cor(Xtrain[,i], residuals[,l], method=c("spearman"))
+  }
+  corr_genes[l,] <- correlations
+  max_mag_corr[l] <- max(abs(correlations))
+}
+```
+
+```{r}
+plot(df, max_mag_corr, xlab="# Features", ylab="Maximum Magnitude of Correlation", main="Max Magnitude of Correlation of a Gene with Residuals by # Features")
+```
+
+We expect that the correlation of the residuals is 0 under the null hypothesis that we are correctly fitting p(y|x). We will test this hypothesis on the test data. Here we are using spearman rho coefficient as measure of correlation. We will determine significance via a permutation test. In particular, for each gene, we will ask if it is significantly correlated with the residuals. The null hypothesis is that it is not significantly correlated with the residuals. Furthermore, we will test this at each level of $\lambda$. To test this hypothesis, we will be using the statistic 
+\[
+    t = r \sqrt{\frac{n-2}{1-r^2}}
+\]
+which is approximately distributed as a $t$-distribution with $n-2$ degrees of freedom under the nul hypothesis. (https://en.wikipedia.org/wiki/Spearman%27s_rank_correlation_coefficient)
+
+Remark: A permutation test is cost-prohibitive here, so we will rely on this approximation. 
+
+We are witnessing a tradeoff between the dimensionality of the model, the accuracy of fitting p(Y|X), and making correct predictions.
+```{r}
+# Classify test data
+test_ambigs = rep(0, length(lambda))
+test_nulls = rep(0, length(lambda))
+test_coverage_rate = rep(0, length(lambda))
+lasso_response_test <- predict(fit, newx=Xtest, type="response", s=lambda)
+test_residuals <- matrix(0, nrow=length(test), ncol=length(lambda))
+for(l in 1:length(lambda)){
+  results = matrix(0L, ncol=5, nrow=length(test))
+  
+  for(i in 1:length(test)) {
+    for(tum in 1:length(tumors)){
+      if(lasso_response_test[i,tum,l] >= t_vals[l]){
+        results[i, tum] = 1
+      }
+    }
+    test_residuals[i, l] <- 1.0 - lasso_response_test[i,Ytest[i],l]
+  }
+  
+  # Count number of points with null classification
+  num_null <- length(which(rowSums(results) == 0))
+  test_nulls[l] <- num_null
+  
+  # Count number of points with more than 1 classification
+  num_ambig <- length(which(rowSums(results) > 1))
+  test_ambigs[l] <- num_ambig
+  
+  # Compute coverage rate
+  coverage_rate <- 0
+  for(i in 1:length(test)) {
+    if(results[i, Ytest[i]] == 1) {
+      coverage_rate <- coverage_rate + 1
+    }
+  }
+  test_coverage_rate[l] <- coverage_rate/length(test)
+}
+```
+```{r}
+plot(df, test_ambigs, xlab="# Features", ylab="# Ambiguous Classifications", main="Test - # Ambiguous by # Features")
+plot(df, test_nulls, xlab="# Features", ylab="# Null Classifications", main="Test - # Null by # Features")
+plot(df, test_coverage_rate, ylim=c(0.8, 1.0), xlab="# Features", ylab="Coverage Rate", main = "Test - Coverage Rate by # Features")
+```
+
+```{r}
+test_corr_genes <- matrix(0, nrow=length(lambda), ncol=NUM_GENES)
+test_max_mag_corr <- rep(0, length(lambda))
+for(l in 1:length(lambda)){
+  correlations <- rep(0, NUM_GENES)
+  for(i in 1:NUM_GENES) {
+    if(sd(Xtest[,i]) == 0){
+      next
+    }
+    correlations[i] <- cor(Xtest[,i], test_residuals[,l], method=c("spearman"))
+  }
+  test_corr_genes[l,] <- correlations
+  test_max_mag_corr[l] <- max(abs(correlations))
+}
+```
+
+Hypothesis testing is done using this test statistic 
+\[
+  t = r \sqrt{\frac{n-2}{1-r^2}}
+\]
+We will test for each gene at each value of lambda. Large multiple testing burden, but let's see what shakes out. We will be doing a two-sided test at the 0.01 significance level. 
+```{r}
+pvals <- matrix(1, nrow=length(lambda), ncol=NUM_GENES)
+for(l in 1:length(lambda)){
+  t_stats <- test_corr_genes[l,]*((length(Ytest) - 2)/(1-(test_corr_genes[l,])**2))**0.5
+  pvals[l,] <- 2*pt(-abs(t_stats), length(Ytest)-2)
+}
+adjusted_pvals <- matrix(p.adjust(pvals, method=c("BH")), nrow=length(lambda), ncol=NUM_GENES)
+```
+
+```{r}
+num_sig <- rep(0, length(lambda))
+for(l in 1:length(lambda)){
+  num_sig[l] <- length(which(adjusted_pvals[l,] < 0.01))
+}
+```
+
+```{r}
+plot(df, num_sig, xlab="# Features", ylab="# Genes Significantly Correlated", main="Significant Correlation with Residuals")
+```
+
+Observe that the number of genes that are significantly correlated with the the residuals drops astoundingly as more features are added (this is most likely due to strong inter-gene correlations). However, consider that even with 40 features, we have many genes that are significantly correlated with the residuals (recall our definition of residual above), and so we do not expect that we are estimating p(Y|X) very accurately. 
+  In contrast, observe that classification occurs with close to 0 ambiguity near 12-13 features. Here, we have a very large number of genes that are significantly correlated with the residuals. As such, we can still classify with very few ambiguities (with $1-\alpha$ coverage) while not estimating p(Y|X) accurately. This reflects the general rule of thumb that classification is easier than estimating $p(Y|X)$.
+    However, this result moreso reflects the power of the split-conformal step outlined in Sadinle et al. Despite the extreme number of genes that are significantly correlated with the residuals at 10-20 features, we are still able to maintain minimize ambiguity and guarantee $1-\alpha$ coverage. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

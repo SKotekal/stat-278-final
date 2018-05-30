@@ -249,19 +249,7 @@ print(test_ambig)
 ```
 and we see that the number of ambiguous classifications rises dramatically. (This is not a rigorous comparison since we used the test data to find the genes that expressed significantly differently. This is just kind of for intuition. Also, don't know if this result is due to no significant gene expression difference or because few genes remaining in feature list). 
 
-So why do we need these extra genes? What purpose do they serve? 
-
-As such, we asked about the correlation structure between the genes. We use the Spearman $\rho$ coefficient to avoid linear assumptions.
-
-```{r}
-gene_corr = cor(Xtest[,high_var_ind], method=c('spearman'))
-```
-
-```{r}
-mean(feat_vars[no_sig_ind])
-mean(feat_vars[setdiff(high_var_ind, no_sig_ind)])
-```
-
+So why do we need these extra genes? What purpose do they serve? (Who knows...)
 
 
 
